@@ -4,6 +4,7 @@
 """"Benchmarking apple M1Pro with Tensorflow
 @wandbcode{apple_m1_pro}"""
 
+import glob
 import re, math, argparse
 from types import SimpleNamespace
 from pathlib import Path
@@ -19,6 +20,7 @@ import torch.nn as nn
 import torchvision as tv
 import torchvision.transforms as T
 from torch.cuda.amp import autocast
+from torch.profiler import tensorboard_trace_handler
 
 PROJECT = "channels_last"
 ENTITY = "capecape"
@@ -55,6 +57,7 @@ def parse_args():
     parser.add_argument('--channels_last', action="store_true")
     parser.add_argument('--optimizer', type=str, default=config_defaults.optimizer)
     parser.add_argument('--subclass', action="store_true")
+    parser.add_argument('--profile', action="store_true")
     return parser.parse_args()
 
 def get_pets():
@@ -148,14 +151,28 @@ def train(config=config_defaults):
         optimizer = getattr(torch.optim, config.optimizer)
         optimizer = optimizer(model.parameters(), lr=config.learning_rate)
 
-       # Training
+        # create the profiler
+        wait, warmup, active, repeat = 3, 3, 3, 1
+        total_profile_steps = (wait + warmup + active) * (1 + repeat)
+        schedule = torch.profiler.schedule(  # define startup behavior of profiler
+          wait=wait, warmup=warmup, active=active, repeat=repeat)
+        profiler = torch.profiler.profile(
+          schedule=schedule,
+          on_trace_ready=tensorboard_trace_handler(  # write trace in tensorboard format
+            "wandb/latest-run/files"),  # and save to W&B
+            with_stack=False)  # without the extra call stack info
+
+        # Training
         example_ct = 0
         step_ct = 0
         total_time = perf_counter()
         for epoch in tqdm(range(config.epochs)):
             t0 = perf_counter()
             model.train()
+            if epoch == 0 and config.profile:
+              profiler.__enter__()  # start the profiler when we start, if we're profiling
             for step, (images, labels) in enumerate(tqdm(train_dl, leave=False)):
+                profiler.step()  # every step we take (fwd/bwd/update) is a "step" for the profiler
                 if config.subclass:
                     images = images.as_subclass(SubClassedTensor)
                 images, labels = images.to(config.device), labels.to(config.device)
@@ -185,7 +202,12 @@ def train(config=config_defaults):
                     wandb.log(metrics)
 
                 step_ct += 1
-        wandb.summary["total_time"] = perf_counter() - total_time   
+        wandb.summary["total_time"] = perf_counter() - total_time
+
+        # also upload profile as an artifact so we can add it to Reports
+        profile_art = wandb.Artifact("trace", type="profile")
+        profile_art.add_file(glob.glob("wandb/latest-run/files/*.pt.trace.json")[0])
+        wandb.log_artifact(profile_art)
                 
 if __name__ == "__main__":
     args = parse_args()
