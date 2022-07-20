@@ -21,7 +21,7 @@ import torchvision.transforms as T
 from torch.cuda.amp import autocast
 
 PROJECT = "channels_last"
-ENTITY = "capecape"
+ENTITY = None 
 GROUP = "pytorch"
 
 config_defaults = SimpleNamespace(
